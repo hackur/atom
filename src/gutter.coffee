@@ -1,4 +1,5 @@
 {Emitter} = require 'event-kit'
+CustomGutterComponent = null
 
 DefaultPriority = -100
 
@@ -70,12 +71,14 @@ class Gutter
   hide: ->
     if @visible
       @visible = false
+      @gutterContainer.scheduleComponentUpdate()
       @emitter.emit 'did-change-visible', this
 
   # Essential: Show the gutter.
   show: ->
     if not @visible
       @visible = true
+      @gutterContainer.scheduleComponentUpdate()
       @emitter.emit 'did-change-visible', this
 
   # Essential: Determine whether the gutter is visible.
@@ -100,3 +103,6 @@ class Gutter
   # Returns a {Decoration} object
   decorateMarker: (marker, options) ->
     @gutterContainer.addGutterDecoration(this, marker, options)
+
+  getElement: ->
+    @element ?= document.createElement('div')

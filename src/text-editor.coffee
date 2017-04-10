@@ -12,7 +12,7 @@ Model = require './model'
 Selection = require './selection'
 TextMateScopeSelector = require('first-mate').ScopeSelector
 GutterContainer = require './gutter-container'
-TextEditorElement = require './text-editor-element'
+TextEditorComponent = null
 {isDoubleWidthCharacter, isHalfWidthCharacter, isKoreanCharacter, isWrapBoundary} = require './text-utils'
 
 ZERO_WIDTH_NBSP = '\ufeff'
@@ -60,6 +60,16 @@ module.exports =
 class TextEditor extends Model
   @setClipboard: (clipboard) ->
     @clipboard = clipboard
+
+  @setScheduler: (scheduler) ->
+    TextEditorComponent ?= require './text-editor-component'
+    TextEditorComponent.setScheduler(scheduler)
+
+  @didUpdateScrollbarStyles: ->
+    TextEditorComponent ?= require './text-editor-component'
+    TextEditorComponent.didUpdateScrollbarStyles()
+
+  @viewForItem: (item) -> item.element ? item
 
   serializationVersion: 1
 
@@ -199,6 +209,9 @@ class TextEditor extends Model
     @selectionsMarkerLayer.trackDestructionInOnDidCreateMarkerCallbacks = true
 
     @decorationManager = new DecorationManager(@displayLayer)
+    @decorateMarkerLayer(@selectionsMarkerLayer, type: 'cursor')
+    @decorateCursorLine() unless @isMini()
+
     @decorateMarkerLayer(@displayLayer.foldsMarkerLayer, {type: 'line-number', class: 'folded'})
 
     for marker in @selectionsMarkerLayer.getMarkers()
@@ -219,6 +232,13 @@ class TextEditor extends Model
       name: 'line-number'
       priority: 0
       visible: lineNumberGutterVisible
+
+  decorateCursorLine: ->
+    @cursorLineDecorations = [
+      @decorateMarkerLayer(@selectionsMarkerLayer, type: 'line', class: 'cursor-line', onlyEmpty: true),
+      @decorateMarkerLayer(@selectionsMarkerLayer, type: 'line-number', class: 'cursor-line'),
+      @decorateMarkerLayer(@selectionsMarkerLayer, type: 'line-number', class: 'cursor-line-no-selection', onlyHead: true, onlyEmpty: true)
+    ]
 
   doBackgroundWork: (deadline) =>
     if @displayLayer.doBackgroundWork(deadline)
@@ -292,6 +312,11 @@ class TextEditor extends Model
             displayLayerParams.invisibles = @getInvisibles()
             displayLayerParams.softWrapColumn = @getSoftWrapColumn()
             displayLayerParams.showIndentGuides = @doesShowIndentGuide()
+            if @mini
+              decoration.destroy() for decoration in @cursorLineDecorations
+              @cursorLineDecorations = null
+            else
+              @decorateCursorLine()
 
         when 'placeholderText'
           if value isnt @placeholderText
@@ -339,7 +364,7 @@ class TextEditor extends Model
         when 'scrollPastEnd'
           if value isnt @scrollPastEnd
             @scrollPastEnd = value
-            @presenter?.didChangeScrollPastEnd()
+            @component?.scheduleUpdate()
 
         when 'autoHeight'
           if value isnt @autoHeight
@@ -362,10 +387,13 @@ class TextEditor extends Model
 
     @displayLayer.reset(displayLayerParams)
 
-    if @editorElement?
-      @editorElement.views.getNextUpdatePromise()
+    if @component?
+      @component.getNextUpdatePromise()
     else
       Promise.resolve()
+
+  scheduleComponentUpdate: ->
+    @component?.scheduleUpdate()
 
   serialize: ->
     tokenizedBufferState = @tokenizedBuffer.serialize()
@@ -749,9 +777,6 @@ class TextEditor extends Model
 
   isMini: -> @mini
 
-  setUpdatedSynchronously: (updatedSynchronously) ->
-    @decorationManager.setUpdatedSynchronously(updatedSynchronously)
-
   onDidChangeMini: (callback) ->
     @emitter.on 'did-change-mini', callback
 
@@ -986,7 +1011,7 @@ class TextEditor extends Model
     tokens
 
   screenLineForScreenRow: (screenRow) ->
-    @displayLayer.getScreenLines(screenRow, screenRow + 1)[0]
+    @displayLayer.getScreenLine(screenRow)
 
   bufferRowForScreenRow: (screenRow) ->
     @displayLayer.translateScreenPosition(Point(screenRow, 0)).row
@@ -1755,16 +1780,20 @@ class TextEditor extends Model
   #     line, highlight, or overlay.
   #   * `item` (optional) An {HTMLElement} or a model {Object} with a
   #     corresponding view registered. Only applicable to the `gutter`,
-  #     `overlay` and `block` types.
+  #     `overlay` and `block` decoration types.
   #   * `onlyHead` (optional) If `true`, the decoration will only be applied to
   #     the head of the `DisplayMarker`. Only applicable to the `line` and
-  #     `line-number` types.
+  #     `line-number` decoration types.
   #   * `onlyEmpty` (optional) If `true`, the decoration will only be applied if
   #     the associated `DisplayMarker` is empty. Only applicable to the `gutter`,
-  #     `line`, and `line-number` types.
+  #     `line`, and `line-number` decoration types.
   #   * `onlyNonEmpty` (optional) If `true`, the decoration will only be applied
   #     if the associated `DisplayMarker` is non-empty. Only applicable to the
-  #     `gutter`, `line`, and `line-number` types.
+  #     `gutter`, `line`, and `line-number` decoration types.
+  #   * `omitEmptyLastRow` (optional) If `false`, the decoration will be applied
+  #     to the last row of a non-empty range, even if it ends at column 0.
+  #     Defaults to `true`. Only applicable to the `gutter`, `line`, and
+  #     `line-number` decoration types.
   #   * `position` (optional) Only applicable to decorations of type `overlay` and `block`.
   #     Controls where the view is positioned relative to the `TextEditorMarker`.
   #     Values can be `'head'` (the default) or `'tail'` for overlay decorations, and
@@ -1851,12 +1880,6 @@ class TextEditor extends Model
   # Returns an {Array} of {Decoration}s.
   getOverlayDecorations: (propertyFilter) ->
     @decorationManager.getOverlayDecorations(propertyFilter)
-
-  decorationForId: (id) ->
-    @decorationManager.decorationForId(id)
-
-  decorationsForMarkerId: (id) ->
-    @decorationManager.decorationsForMarkerId(id)
 
   ###
   Section: Markers
@@ -2096,9 +2119,9 @@ class TextEditor extends Model
   #
   # Returns the first matched {Cursor} or undefined
   getCursorAtScreenPosition: (position) ->
-    for cursor in @cursors
-      return cursor if cursor.getScreenPosition().isEqual(position)
-    undefined
+    if selection = @getSelectionAtScreenPosition(position)
+      if selection.getHeadScreenPosition().isEqual(position)
+        selection.cursor
 
   # Essential: Get the position of the most recently added cursor in screen
   # coordinates.
@@ -2140,7 +2163,7 @@ class TextEditor extends Model
   #
   # Returns a {Cursor}.
   addCursorAtBufferPosition: (bufferPosition, options) ->
-    @selectionsMarkerLayer.markBufferPosition(bufferPosition, {invalidate: 'never'})
+    @selectionsMarkerLayer.markBufferPosition(bufferPosition, Object.assign({invalidate: 'never'}, options))
     @getLastSelection().cursor.autoscroll() unless options?.autoscroll is false
     @getLastSelection().cursor
 
@@ -2287,9 +2310,6 @@ class TextEditor extends Model
     cursor = new Cursor(editor: this, marker: marker, showCursorOnSelection: @showCursorOnSelection)
     @cursors.push(cursor)
     @cursorsByMarkerId.set(marker.id, cursor)
-    @decorateMarker(marker, type: 'line-number', class: 'cursor-line')
-    @decorateMarker(marker, type: 'line-number', class: 'cursor-line-no-selection', onlyHead: true, onlyEmpty: true)
-    @decorateMarker(marker, type: 'line', class: 'cursor-line', onlyEmpty: true)
     cursor
 
   moveCursors: (fn) ->
@@ -2649,6 +2669,11 @@ class TextEditor extends Model
   getLastSelection: ->
     @createLastSelectionIfNeeded()
     _.last(@selections)
+
+  getSelectionAtScreenPosition: (position) ->
+    markers = @selectionsMarkerLayer.findMarkers(containsScreenPosition: position)
+    if markers.length > 0
+      @cursorsByMarkerId.get(markers[0].id).selection
 
   # Extended: Get current {Selection}s.
   #
@@ -3379,6 +3404,9 @@ class TextEditor extends Model
   getGutters: ->
     @gutterContainer.getGutters()
 
+  getLineNumberGutter: ->
+    @lineNumberGutter
+
   # Essential: Get the gutter with the given name.
   #
   # Returns a {Gutter}, or `null` if no gutter exists for the given name.
@@ -3426,6 +3454,7 @@ class TextEditor extends Model
     @getElement().scrollToBottom()
 
   scrollToScreenRange: (screenRange, options = {}) ->
+    screenRange = @clipScreenRange(screenRange)
     scrollEvent = {screenRange, options}
     @emitter.emit "did-request-autoscroll", scrollEvent
 
@@ -3543,7 +3572,12 @@ class TextEditor extends Model
 
   # Get the Element for the editor.
   getElement: ->
-    @editorElement ?= new TextEditorElement().initialize(this, atom)
+    if @component?
+      @component.element
+    else
+      TextEditorComponent ?= require('./text-editor-component')
+      new TextEditorComponent({model: this, styleManager: atom.styles})
+      @component.element
 
   # Essential: Retrieves the greyed out placeholder of a mini editor.
   #
@@ -3600,7 +3634,10 @@ class TextEditor extends Model
       @doubleWidthCharWidth = doubleWidthCharWidth
       @halfWidthCharWidth = halfWidthCharWidth
       @koreanCharWidth = koreanCharWidth
-      @displayLayer.reset({}) if @isSoftWrapped() and @getEditorWidthInChars()?
+      if @isSoftWrapped()
+        @displayLayer.reset({
+          softWrapColumn: @getSoftWrapColumn()
+        })
     defaultCharWidth
 
   setHeight: (height, reentrant=false) ->
@@ -3618,8 +3655,8 @@ class TextEditor extends Model
 
   getAutoWidth: -> @autoWidth ? false
 
-  setWidth: (width, reentrant=false) ->
-    if reentrant
+  setWidth: (width, fromComponent=false) ->
+    if fromComponent
       @update({width})
       @width
     else

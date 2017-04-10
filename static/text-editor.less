@@ -1,0 +1,42 @@
+atom-text-editor {
+  position: relative;
+
+  .gutter-container {
+    float: left;
+    width: min-content;
+    background-color: inherit;
+  }
+
+  .line-numbers {
+    width: max-content;
+    background-color: inherit;
+    contain: content;
+  }
+
+  .line-number {
+    width: min-content;
+    padding-left: .5em;
+    white-space: nowrap;
+    opacity: 0.6;
+
+    .icon-right {
+      .octicon(chevron-down, 0.8em);
+      display: inline-block;
+      visibility: hidden;
+      opacity: .6;
+      padding: 0 .4em;
+
+      &::before {
+        text-align: center;
+      }
+    }
+  }
+
+  .lines {
+    contain: strict;
+    background-color: inherit;
+    float: left;
+    will-change: transform;
+    overflow: hidden;
+  }
+}
